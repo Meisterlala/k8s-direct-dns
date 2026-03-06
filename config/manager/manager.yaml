@@ -63,7 +63,7 @@ spec:
           args:
             - --leader-elect
             - --health-probe-bind-address=:8081
-                  image: ghcr.io/meisterlala/k8s-direct-dns@sha256:6f2e2123fb41a6946d34ba282590f07e2a36c5a9e35be3235b6046ceb11fdc85
+          image: ghcr.io/meisterlala/k8s-direct-dns:latest
           name: manager
           ports: []
           securityContext:

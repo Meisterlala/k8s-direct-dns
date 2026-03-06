@@ -60,7 +60,6 @@ jobs:
           fi
 
       - name: Build and push image
-        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -72,26 +71,3 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: false
           sbom: false
-
-      - name: Update manager image digest
-        if: github.ref == 'refs/heads/master'
-        env:
-          IMAGE: ${{ steps.prep.outputs.image }}@${{ steps.build.outputs.digest }}
-        run: |
-          sed -i -E "s|image: .*|        image: ${IMAGE}|" config/manager/manager.yaml
-
-      - name: Commit manifest update
-        if: github.ref == 'refs/heads/master'
-        env:
-          IMAGE: ${{ steps.prep.outputs.image }}@${{ steps.build.outputs.digest }}
-        run: |
-          if git diff --quiet -- config/manager/manager.yaml; then
-            echo "No manifest changes to commit"
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add config/manager/manager.yaml
-          git commit -m "chore(image): pin manager image to ${IMAGE}"
-          git push
