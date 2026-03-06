@@ -46,16 +46,6 @@ jobs:
         id: prep
         run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
-      - name: Extract image metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ steps.prep.outputs.image }}
-          tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
-            type=ref,event=branch
-            type=sha,format=short
-
       - name: Select build platforms
         id: platforms
         run: |
@@ -66,28 +56,38 @@ jobs:
           fi
 
       - name: Build and push image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: ${{ steps.platforms.outputs.value }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.prep.outputs.image }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
           sbom: false
 
-      - name: Create release tag
+      - name: Update manager image digest
         if: github.ref == 'refs/heads/master'
+        env:
+          IMAGE: ${{ steps.prep.outputs.image }}@${{ steps.build.outputs.digest }}
+        run: |
+          sed -i -E "s|image: .*|          image: ${IMAGE}|" config/manager/manager.yaml
+
+      - name: Commit manifest update
+        if: github.ref == 'refs/heads/master'
+        env:
+          IMAGE: ${{ steps.prep.outputs.image }}@${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          TAG="v0.0.${GITHUB_RUN_NUMBER}"
-          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
-            echo "Tag ${TAG} already exists"
+          if git diff --quiet -- config/manager/manager.yaml; then
+            echo "No manifest changes to commit"
             exit 0
           fi
-          git tag -a "${TAG}" -m "Release ${TAG}"
-          git push origin "${TAG}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add config/manager/manager.yaml
+          git commit -m "chore(image): pin manager image to ${IMAGE}"
+          git push
