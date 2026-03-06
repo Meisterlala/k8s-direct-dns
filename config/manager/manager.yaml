@@ -21,7 +21,7 @@ spec:
     matchLabels:
       control-plane: controller-manager
       app.kubernetes.io/name: k8s-direct-dns
-  replicas: 1
+  replicas: 2
   template:
     metadata:
       annotations:
