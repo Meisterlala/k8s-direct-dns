@@ -3,7 +3,7 @@ name: Build And Publish Image
 on:
   push:
     branches:
-      - main
+      - "**"
   workflow_dispatch:
 
 permissions:
@@ -44,9 +44,9 @@ jobs:
         with:
           images: ${{ steps.prep.outputs.image }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
+            type=ref,event=branch
             type=sha,format=short
-            type=semver,pattern={{version}}
 
       - name: Build and push image
         id: build
