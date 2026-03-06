@@ -149,15 +149,17 @@ kubebuilder edit --plugins=helm/v2-alpha
 
 ## GitHub Image Automation
 
-The repository includes a GitHub Actions workflow at `.github/workflows/image.yml` that builds and pushes a multi-arch image (`linux/amd64`, `linux/arm64`) to GHCR:
+The repository includes a GitHub Actions workflow at `.github/workflows/image.yml` that:
 
-- `ghcr.io/<owner>/k8s-direct-dns:latest` on `master`
-- `ghcr.io/<owner>/k8s-direct-dns:branch-<branch-name>` on branch pushes
-- `ghcr.io/<owner>/k8s-direct-dns:sha-<shortsha>` on all builds
+- validates deploy manifests with `kustomize build config/default`
+- builds and pushes a multi-arch image (`linux/amd64`, `linux/arm64`) to GHCR
+- publishes these image tags:
+  - `ghcr.io/<owner>/k8s-direct-dns:latest` on `master`
+  - `ghcr.io/<owner>/k8s-direct-dns:branch-<branch-name>` on branch pushes
+  - `ghcr.io/<owner>/k8s-direct-dns:sha-<shortsha>` on all builds
+- creates an immutable release tag `v0.0.<run_number>` for successful `master` builds
 
-After publishing, the workflow also updates `config/manager/manager.yaml` to pin the Deployment image to the pushed digest and commits that change back to `master`.
-
-This lets Flux deploy directly from this repository (`./config/default`) while still automatically rolling out new controller builds, regardless of cluster name or environment.
+Recommended Flux strategy: track this repository with a semver selector (for example `>=0.0.0`) so the cluster only rolls forward to validated, tagged releases instead of every commit on `master`.
 
 ## Troubleshooting
 
