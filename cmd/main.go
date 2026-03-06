@@ -67,6 +67,8 @@ func main() {
 	var dnsResolver string
 	var dnsResolveInterval time.Duration
 	var resolveTargetHostnames bool
+	var enableIPv4 bool
+	var enableIPv6 bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -91,6 +93,10 @@ func main() {
 		"Requeue interval used for routes with hostname target resolution enabled.")
 	flag.BoolVar(&resolveTargetHostnames, "resolve-target-hostnames", false,
 		"Enable hostname target resolution for all HTTPRoutes by default.")
+	flag.BoolVar(&enableIPv4, "enable-ipv4", true,
+		"Enable publishing IPv4 (A) targets.")
+	flag.BoolVar(&enableIPv6, "enable-ipv6", false,
+		"Enable publishing IPv6 (AAAA) targets.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -196,6 +202,8 @@ func main() {
 		DNSServer:        dnsResolver,
 		ResolveInterval:  dnsResolveInterval,
 		ResolveByDefault: resolveTargetHostnames,
+		EnableIPv4:       enableIPv4,
+		EnableIPv6:       enableIPv6,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "HTTPRoute")
 		os.Exit(1)

@@ -104,6 +104,14 @@ Controller flags:
 - `--dns-resolver=host[:port]` (default: `1.1.1.1:53`)
 - `--dns-resolve-interval=1m`
 - `--resolve-target-hostnames=false` (default)
+- `--enable-ipv4=true` (default)
+- `--enable-ipv6=false` (default)
+
+IP family behavior:
+
+- IPv4-only by default (`A` records)
+- Set both `--enable-ipv4=true --enable-ipv6=true` for dual-stack (`A` + `AAAA`)
+- CNAME targets are not affected by IP family flags
 
 Precedence:
 

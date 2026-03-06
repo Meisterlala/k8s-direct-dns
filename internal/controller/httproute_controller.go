@@ -65,6 +65,8 @@ type HTTPRouteReconciler struct {
 	DNSServer        string
 	ResolveInterval  time.Duration
 	ResolveByDefault bool
+	EnableIPv4       bool
+	EnableIPv6       bool
 }
 
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch
@@ -117,6 +119,8 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if requeueAfterResolve && r.ResolveInterval > 0 {
 		result.RequeueAfter = r.ResolveInterval
 	}
+
+	targets = filterTargetsByIPFamily(targets, r.EnableIPv4, r.EnableIPv6)
 
 	if len(targets) == 0 {
 		log.Info("Skipping HTTPRoute because no ingress nodes with publishable addresses were found in backend zones", "name", route.Name, "namespace", route.Namespace)
@@ -268,6 +272,27 @@ func normalizeDNSServer(server string) string {
 	}
 
 	return trimmed + ":53"
+}
+
+func filterTargetsByIPFamily(targets []string, enableIPv4, enableIPv6 bool) []string {
+	filtered := make([]string, 0, len(targets))
+	for _, target := range targets {
+		recordType := recordTypeForTarget(target)
+		switch recordType {
+		case "A":
+			if !enableIPv4 {
+				continue
+			}
+		case "AAAA":
+			if !enableIPv6 {
+				continue
+			}
+		}
+
+		filtered = append(filtered, target)
+	}
+
+	return filtered
 }
 
 // SetupWithManager sets up the controller with the Manager.

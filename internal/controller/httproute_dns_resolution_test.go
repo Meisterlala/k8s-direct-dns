@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"reflect"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -96,6 +97,54 @@ func TestRouteDNSServer(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := routeDNSServer(&tt.route, tt.fallback); got != tt.want {
 				t.Fatalf("routeDNSServer() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFilterTargetsByIPFamily(t *testing.T) {
+	tests := []struct {
+		name       string
+		targets    []string
+		enableIPv4 bool
+		enableIPv6 bool
+		want       []string
+	}{
+		{
+			name:       "ipv4 only default",
+			targets:    []string{"203.0.113.1", "2001:db8::1", "edge.example.net"},
+			enableIPv4: true,
+			enableIPv6: false,
+			want:       []string{"203.0.113.1", "edge.example.net"},
+		},
+		{
+			name:       "ipv6 only",
+			targets:    []string{"203.0.113.1", "2001:db8::1", "edge.example.net"},
+			enableIPv4: false,
+			enableIPv6: true,
+			want:       []string{"2001:db8::1", "edge.example.net"},
+		},
+		{
+			name:       "dual stack enabled",
+			targets:    []string{"203.0.113.1", "2001:db8::1", "edge.example.net"},
+			enableIPv4: true,
+			enableIPv6: true,
+			want:       []string{"203.0.113.1", "2001:db8::1", "edge.example.net"},
+		},
+		{
+			name:       "both disabled keeps cname only",
+			targets:    []string{"203.0.113.1", "2001:db8::1", "edge.example.net"},
+			enableIPv4: false,
+			enableIPv6: false,
+			want:       []string{"edge.example.net"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := filterTargetsByIPFamily(tt.targets, tt.enableIPv4, tt.enableIPv6)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("filterTargetsByIPFamily() = %#v, want %#v", got, tt.want)
 			}
 		})
 	}
