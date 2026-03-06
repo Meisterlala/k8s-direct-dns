@@ -48,7 +48,7 @@ No custom topology API is introduced.
 
 ## Shared Public IP Limitation (Important)
 
-If two nodes share the same public IP (for example, `odin` and `raspberry-pi`), DNS cannot uniquely pin traffic to one of those nodes using A/AAAA records alone.
+If two nodes share the same public IP (for example, behind the same NAT), DNS cannot uniquely pin traffic to one of those nodes using A/AAAA records alone.
 
 Behavior:
 
@@ -105,6 +105,13 @@ make docker-build docker-push IMG=<some-registry>/k8s-direct-dns:tag
 make deploy IMG=<some-registry>/k8s-direct-dns:tag
 ```
 
+Examples:
+
+```sh
+make docker-build docker-push IMG=ghcr.io/<owner>/k8s-direct-dns:latest
+make deploy IMG=ghcr.io/<owner>/k8s-direct-dns:latest
+```
+
 ### Uninstall
 
 ```sh
@@ -131,12 +138,13 @@ kubebuilder edit --plugins=helm/v2-alpha
 
 The repository includes a GitHub Actions workflow at `.github/workflows/image.yml` that builds and pushes a multi-arch image (`linux/amd64`, `linux/arm64`) to GHCR:
 
-- `ghcr.io/meisterlala/k8s-direct-dns:latest` on `main`
-- `ghcr.io/meisterlala/k8s-direct-dns:sha-<shortsha>` on `main`
+- `ghcr.io/<owner>/k8s-direct-dns:latest` on `master`
+- `ghcr.io/<owner>/k8s-direct-dns:branch-<branch-name>` on branch pushes
+- `ghcr.io/<owner>/k8s-direct-dns:sha-<shortsha>` on all builds
 
-After publishing, the workflow also updates `config/manager/manager.yaml` to pin the Deployment image to the pushed digest and commits that change back to `main`.
+After publishing, the workflow also updates `config/manager/manager.yaml` to pin the Deployment image to the pushed digest and commits that change back to `master`.
 
-This lets Flux deploy directly from this repository (`./config/default`) while still automatically rolling out new controller builds.
+This lets Flux deploy directly from this repository (`./config/default`) while still automatically rolling out new controller builds, regardless of cluster name or environment.
 
 ## Troubleshooting
 

@@ -109,7 +109,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, r.deleteDNSEndpoint(ctx, route.Namespace, dnsEndpointName(req.NamespacedName))
 	}
 
-	if err := r.upsertDNSEndpoint(ctx, route, hostnames, target); err != nil {
+	if err := r.upsertDNSEndpoint(ctx, route, hostnames, target, routeTTL(route)); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -236,6 +236,7 @@ func (r *HTTPRouteReconciler) upsertDNSEndpoint(
 	route *gatewaynetworkingv1.HTTPRoute,
 	hostnames []string,
 	target string,
+	recordTTL int64,
 ) error {
 	dnsEndpoint := &externaldnsv1alpha1.DNSEndpoint{}
 	dnsEndpoint.Namespace = route.Namespace
@@ -245,9 +246,10 @@ func (r *HTTPRouteReconciler) upsertDNSEndpoint(
 		recordType := recordTypeForTarget(target)
 		records := make([]*endpoint.Endpoint, 0, len(hostnames))
 		for _, hostname := range hostnames {
-			record := endpoint.NewEndpoint(
+			record := endpoint.NewEndpointWithTTL(
 				hostname,
 				recordType,
+				endpoint.TTL(recordTTL),
 				target,
 			)
 			if record != nil {
@@ -325,6 +327,20 @@ func routeHostnames(route *gatewaynetworkingv1.HTTPRoute) []string {
 	slices.Sort(hostnames)
 
 	return hostnames
+}
+
+func routeTTL(route *gatewaynetworkingv1.HTTPRoute) int64 {
+	raw, ok := route.Annotations[annotationTTL]
+	if !ok || raw == "" {
+		return 60
+	}
+
+	ttl, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || ttl <= 0 {
+		return 60
+	}
+
+	return ttl
 }
 
 func backendServiceNames(route *gatewaynetworkingv1.HTTPRoute) []string {
