@@ -45,7 +45,7 @@ The controller relies on existing Kubernetes topology and endpoint data:
 - `EndpointSlice.endpoints[].conditions.ready`
 - `Node.labels[topology.kubernetes.io/zone]`
 - Ingress role labels on nodes (`node-role.kubernetes.io/ingress` or legacy `kubernetes.io/role=ingress`)
-- `Node.status.addresses` (`ExternalIP`, `InternalIP`)
+- `Node.status.addresses` (`ExternalDNS`, `ExternalIP`, `InternalIP`)
 - Standard topology labels remain available for cluster operations (`topology.kubernetes.io/zone`, `topology.kubernetes.io/region`, `kubernetes.io/hostname`)
 
 No custom topology API is introduced.
@@ -75,6 +75,15 @@ On `HTTPRoute`:
 On `Node`:
 
 - `directdns.meisterlala.dev/target`: explicit DNS target override for that node
+
+Node target resolution order:
+
+1. `directdns.meisterlala.dev/target`
+2. `k3s.io/external-dns`
+3. `Node.status.addresses[type=ExternalDNS]`
+4. `k3s.io/external-ip`
+5. `Node.status.addresses[type=ExternalIP]`
+6. `Node.status.addresses[type=InternalIP]`
 
 ## external-dns Configuration
 

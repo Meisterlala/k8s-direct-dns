@@ -46,6 +46,8 @@ const (
 	annotationEnabled = "directdns.meisterlala.dev/enabled"
 	annotationTTL     = "directdns.meisterlala.dev/ttl"
 	nodeTargetAnn     = "directdns.meisterlala.dev/target"
+	k3sExternalDNSAnn = "k3s.io/external-dns"
+	k3sExternalIPAnn  = "k3s.io/external-ip"
 	zoneLabel         = "topology.kubernetes.io/zone"
 	ingressRoleLabel  = "node-role.kubernetes.io/ingress"
 	legacyRoleLabel   = "kubernetes.io/role"
@@ -302,21 +304,54 @@ func (r *HTTPRouteReconciler) ingressTargetsForZones(ctx context.Context, zones 
 }
 
 // resolveNodeTargetFromNode returns the publish target for a node.
-// Priority order: explicit annotation, ExternalIP, then InternalIP.
+// Priority order: direct-dns annotation, k3s annotations/addresses for
+// external DNS and IP, then InternalIP.
 func resolveNodeTargetFromNode(node *corev1.Node) string {
-	if target, ok := node.Annotations[nodeTargetAnn]; ok && target != "" {
-		return target
+	if target, ok := node.Annotations[nodeTargetAnn]; ok {
+		trimmed := strings.TrimSpace(target)
+		if trimmed != "" {
+			return trimmed
+		}
 	}
 
-	for _, address := range node.Status.Addresses {
-		if address.Type == corev1.NodeExternalIP && address.Address != "" {
-			return address.Address
+	if target, ok := node.Annotations[k3sExternalDNSAnn]; ok {
+		trimmed := strings.TrimSpace(target)
+		if trimmed != "" {
+			return trimmed
 		}
 	}
 
 	for _, address := range node.Status.Addresses {
-		if address.Type == corev1.NodeInternalIP && address.Address != "" {
-			return address.Address
+		if address.Type == corev1.NodeExternalDNS {
+			trimmed := strings.TrimSpace(address.Address)
+			if trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+
+	if target, ok := node.Annotations[k3sExternalIPAnn]; ok {
+		trimmed := strings.TrimSpace(target)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+
+	for _, address := range node.Status.Addresses {
+		if address.Type == corev1.NodeExternalIP {
+			trimmed := strings.TrimSpace(address.Address)
+			if trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+
+	for _, address := range node.Status.Addresses {
+		if address.Type == corev1.NodeInternalIP {
+			trimmed := strings.TrimSpace(address.Address)
+			if trimmed != "" {
+				return trimmed
+			}
 		}
 	}
 
