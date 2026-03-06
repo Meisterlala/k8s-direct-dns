@@ -8,4 +8,13 @@ layout:
 - go.kubebuilder.io/v4
 projectName: k8s-direct-dns
 repo: github.com/Meisterlala/k8s-direct-dns
+resources:
+- controller: true
+  domain: k8s.io
+  external: true
+  group: gateway.networking
+  kind: HTTPRoute
+  module: sigs.k8s.io/gateway-api
+  path: sigs.k8s.io/gateway-api/apis/v1
+  version: v1
 version: "3"

@@ -1,135 +1,155 @@
 # k8s-direct-dns
-// TODO(user): Add simple overview of use/purpose
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+`k8s-direct-dns` is a Kubernetes controller that computes DNS targets for `HTTPRoute` resources from real backend placement.
+
+It is built for clusters where you want DNS to follow where the route backend is actually running (node-level awareness), while still letting external-dns do provider updates.
+
+## What It Does
+
+For each `gateway.networking.k8s.io/v1` `HTTPRoute`, the controller:
+
+1. Reads route hostnames (`spec.hostnames` and `external-dns.alpha.kubernetes.io/hostname`)
+2. Resolves backend `Service` references from route rules
+3. Reads matching `EndpointSlice` objects and counts ready endpoints per node
+4. Selects one node deterministically (highest ready endpoint count, then name tie-break)
+5. Resolves a publishable target from that node (`ExternalIP`, fallback `InternalIP`, or explicit node annotation override)
+6. Writes/updates an `externaldns.k8s.io/v1alpha1` `DNSEndpoint`
+
+external-dns then reads those `DNSEndpoint` objects and syncs records to your DNS provider.
+
+## Why DNSEndpoint Instead of HTTPRoute Target Annotation
+
+external-dns Gateway sources only read `external-dns.alpha.kubernetes.io/target` from the `Gateway` object, not per `HTTPRoute` target values.
+
+To support per-route, per-backend-node DNS targets, this controller writes `DNSEndpoint` CRs and external-dns consumes them via `--source=crd`.
+
+## Architecture
+
+Data flow:
+
+`HTTPRoute -> Service backend refs -> EndpointSlice endpoints -> Node -> DNSEndpoint -> external-dns -> DNS provider`
+
+Reconcile triggers:
+
+- `HTTPRoute` changes
+- `EndpointSlice` changes (reconcile affected routes)
+- `Node` changes (reconcile all routes)
+
+## Topology Usage
+
+The controller relies on existing Kubernetes topology and endpoint data:
+
+- `EndpointSlice.endpoints[].nodeName`
+- `EndpointSlice.endpoints[].conditions.ready`
+- `Node.status.addresses` (`ExternalIP`, `InternalIP`)
+- Standard topology labels remain available for cluster operations (`topology.kubernetes.io/zone`, `topology.kubernetes.io/region`, `kubernetes.io/hostname`)
+
+No custom topology API is introduced.
+
+## Shared Public IP Limitation (Important)
+
+If two nodes share the same public IP (for example, `odin` and `raspberry-pi`), DNS cannot uniquely pin traffic to one of those nodes using A/AAAA records alone.
+
+Behavior:
+
+- The controller still selects a single node deterministically
+- If selected nodes resolve to the same publish target IP, resulting DNS records are effectively shared
+
+Optional mitigation:
+
+- Set explicit per-node publish target via node annotation:
+  - `directdns.meisterlala.dev/target: <ip-or-hostname>`
+
+## Supported Annotations
+
+On `HTTPRoute`:
+
+- `directdns.meisterlala.dev/enabled`: `"true"|"false"` (default: true)
+- `directdns.meisterlala.dev/ttl`: integer seconds (default: 60)
+- `external-dns.alpha.kubernetes.io/hostname`: comma-separated additional hostnames
+
+On `Node`:
+
+- `directdns.meisterlala.dev/target`: explicit DNS target override for that node
+
+## external-dns Configuration
+
+Enable CRD source in external-dns and point it to `DNSEndpoint`:
+
+```sh
+external-dns \
+  --source=crd \
+  --crd-source-apiversion=externaldns.k8s.io/v1alpha1 \
+  --crd-source-kind=DNSEndpoint \
+  --provider=<your-provider>
+```
+
+Ensure external-dns has RBAC permissions for `dnsendpoints.externaldns.k8s.io`.
 
 ## Getting Started
 
 ### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+- Go `v1.24+`
+- Docker `17.03+`
+- kubectl `v1.11.3+`
+- Access to a Kubernetes cluster
+- Gateway API CRDs installed
+- external-dns installed
+- `DNSEndpoint` CRD installed (from external-dns)
+
+### Build and Deploy Controller
 
 ```sh
 make docker-build docker-push IMG=<some-registry>/k8s-direct-dns:tag
-```
-
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
-
-**Install the CRDs into the cluster:**
-
-```sh
-make install
-```
-
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
-
-```sh
 make deploy IMG=<some-registry>/k8s-direct-dns:tag
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
-
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
-
-```sh
-kubectl apply -k config/samples/
-```
-
->**NOTE**: Ensure that the samples has default values to test it out.
-
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
-
-```sh
-kubectl delete -k config/samples/
-```
-
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
-make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
+### Uninstall
 
 ```sh
 make undeploy
 ```
 
-## Project Distribution
+## Distribution
 
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
+### YAML Bundle
 
 ```sh
 make build-installer IMG=<some-registry>/k8s-direct-dns:tag
 ```
 
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
+This generates `dist/install.yaml`.
 
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/k8s-direct-dns/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
+### Helm Chart
 
 ```sh
 kubebuilder edit --plugins=helm/v2-alpha
 ```
 
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
+## Troubleshooting
 
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
+- No `DNSEndpoint` created:
+  - Route has no hostnames
+  - Route has no in-namespace `Service` backend refs
+  - Backend endpoints are not ready
+  - Endpoints do not carry `nodeName`
+- DNS target not what you expect:
+  - Check selected node addresses (`ExternalIP` preferred, then `InternalIP`)
+  - Check node override annotation `directdns.meisterlala.dev/target`
+- Route should be ignored:
+  - Set `directdns.meisterlala.dev/enabled: "false"`
 
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
+## Development
 
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+```sh
+make manifests generate
+make lint-fix
+make test
+```
 
 ## License
 
 Copyright 2026.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+Licensed under the Apache License, Version 2.0.

@@ -34,6 +34,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	externaldnsv1alpha1 "sigs.k8s.io/external-dns/apis/v1alpha1"
+	gatewaynetworkingv1 "sigs.k8s.io/gateway-api/apis/v1"
+
+	"github.com/Meisterlala/k8s-direct-dns/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -45,6 +49,8 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
+	utilruntime.Must(gatewaynetworkingv1.Install(scheme))
+	utilruntime.Must(externaldnsv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -73,7 +79,7 @@ func main() {
 		"The directory that contains the metrics server certificate.")
 	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
-	flag.BoolVar(&enableHTTP2, "enable-http2", false,
+	flag.BoolVar(&enableHTTP2, "enable-http2", true,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	opts := zap.Options{
 		Development: true,
@@ -174,6 +180,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&controller.HTTPRouteReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "HTTPRoute")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
