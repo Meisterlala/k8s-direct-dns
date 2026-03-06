@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -67,6 +68,9 @@ type HTTPRouteReconciler struct {
 	ResolveByDefault bool
 	EnableIPv4       bool
 	EnableIPv6       bool
+
+	resolutionMu    sync.RWMutex
+	resolvedHostIPs map[string][]string
 }
 
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch
@@ -111,14 +115,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
-	result := ctrl.Result{}
-	targets, requeueAfterResolve, err := r.resolvedTargetsForRoute(ctx, route, targets)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if requeueAfterResolve && r.ResolveInterval > 0 {
-		result.RequeueAfter = r.ResolveInterval
-	}
+	targets = r.resolvedTargetsForRoute(ctx, route, targets)
 
 	targets = filterTargetsByIPFamily(targets, r.EnableIPv4, r.EnableIPv6)
 
@@ -133,12 +130,12 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	log.Info("Reconciled HTTPRoute DNS targets", "name", route.Name, "namespace", route.Namespace, "nodes", ingressNodeNames, "targets", targets)
 
-	return result, nil
+	return ctrl.Result{}, nil
 }
 
-func (r *HTTPRouteReconciler) resolvedTargetsForRoute(ctx context.Context, route *gatewaynetworkingv1.HTTPRoute, targets []string) ([]string, bool, error) {
+func (r *HTTPRouteReconciler) resolvedTargetsForRoute(ctx context.Context, route *gatewaynetworkingv1.HTTPRoute, targets []string) []string {
 	if !routeResolveTargets(route, r.ResolveByDefault) {
-		return targets, false, nil
+		return targets
 	}
 
 	dnsServer := routeDNSServer(route, r.DNSServer)
@@ -147,7 +144,6 @@ func (r *HTTPRouteReconciler) resolvedTargetsForRoute(ctx context.Context, route
 	}
 
 	resolvedSet := map[string]struct{}{}
-	hadHostTargets := false
 	unresolved := make([]string, 0)
 
 	for _, target := range targets {
@@ -161,12 +157,21 @@ func (r *HTTPRouteReconciler) resolvedTargetsForRoute(ctx context.Context, route
 			continue
 		}
 
-		hadHostTargets = true
+		cacheKey := resolutionCacheKey(dnsServer, trimmed)
+		if cached := r.getCachedResolvedIPs(cacheKey); len(cached) > 0 {
+			for _, ip := range cached {
+				resolvedSet[ip] = struct{}{}
+			}
+
+			continue
+		}
+
 		ips, err := resolveHostTarget(ctx, dnsServer, trimmed)
 		if err != nil {
 			unresolved = append(unresolved, trimmed)
 			continue
 		}
+		r.setCachedResolvedIPs(cacheKey, ips)
 
 		for _, ip := range ips {
 			resolvedSet[ip] = struct{}{}
@@ -176,7 +181,7 @@ func (r *HTTPRouteReconciler) resolvedTargetsForRoute(ctx context.Context, route
 	if len(resolvedSet) == 0 {
 		fallback := append([]string(nil), targets...)
 		slices.Sort(fallback)
-		return fallback, hadHostTargets, nil
+		return fallback
 	}
 
 	resolved := make([]string, 0, len(resolvedSet))
@@ -195,7 +200,7 @@ func (r *HTTPRouteReconciler) resolvedTargetsForRoute(ctx context.Context, route
 		)
 	}
 
-	return resolved, hadHostTargets, nil
+	return resolved
 }
 
 func resolveHostTarget(ctx context.Context, dnsServer, host string) ([]string, error) {
@@ -295,14 +300,198 @@ func filterTargetsByIPFamily(targets []string, enableIPv4, enableIPv6 bool) []st
 	return filtered
 }
 
+func resolutionCacheKey(dnsServer, host string) string {
+	return normalizeDNSServer(dnsServer) + "|" + strings.TrimSuffix(strings.TrimSpace(host), ".")
+}
+
+func (r *HTTPRouteReconciler) getCachedResolvedIPs(key string) []string {
+	r.resolutionMu.RLock()
+	defer r.resolutionMu.RUnlock()
+
+	if r.resolvedHostIPs == nil {
+		return nil
+	}
+
+	ips := r.resolvedHostIPs[key]
+	if len(ips) == 0 {
+		return nil
+	}
+
+	copyIPs := make([]string, len(ips))
+	copy(copyIPs, ips)
+	return copyIPs
+}
+
+func (r *HTTPRouteReconciler) setCachedResolvedIPs(key string, ips []string) {
+	if len(ips) == 0 {
+		return
+	}
+
+	copyIPs := make([]string, len(ips))
+	copy(copyIPs, ips)
+	slices.Sort(copyIPs)
+
+	r.resolutionMu.Lock()
+	defer r.resolutionMu.Unlock()
+
+	if r.resolvedHostIPs == nil {
+		r.resolvedHostIPs = map[string][]string{}
+	}
+
+	r.resolvedHostIPs[key] = copyIPs
+}
+
+func (r *HTTPRouteReconciler) compareAndSetCachedResolvedIPs(key string, ips []string) bool {
+	copyIPs := make([]string, len(ips))
+	copy(copyIPs, ips)
+	slices.Sort(copyIPs)
+
+	r.resolutionMu.Lock()
+	defer r.resolutionMu.Unlock()
+
+	if r.resolvedHostIPs == nil {
+		r.resolvedHostIPs = map[string][]string{}
+	}
+
+	current := r.resolvedHostIPs[key]
+	if slices.Equal(current, copyIPs) {
+		return false
+	}
+
+	r.resolvedHostIPs[key] = copyIPs
+	return true
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	if r.resolvedHostIPs == nil {
+		r.resolvedHostIPs = map[string][]string{}
+	}
+
+	if err := ctrl.NewControllerManagedBy(mgr).
 		For(&gatewaynetworkingv1.HTTPRoute{}).
 		Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(r.mapEndpointSliceToHTTPRoutes)).
 		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.mapNodeToHTTPRoutes)).
 		Named("httproute").
-		Complete(r)
+		Complete(r); err != nil {
+		return err
+	}
+
+	return mgr.Add(r)
+}
+
+// NeedLeaderElection ensures only the leader runs periodic DNS checks.
+func (r *HTTPRouteReconciler) NeedLeaderElection() bool {
+	return true
+}
+
+// Start periodically refreshes resolved hostname IPs and reconciles affected routes.
+func (r *HTTPRouteReconciler) Start(ctx context.Context) error {
+	if r.ResolveInterval <= 0 {
+		<-ctx.Done()
+		return nil
+	}
+
+	ticker := time.NewTicker(r.ResolveInterval)
+	defer ticker.Stop()
+
+	log := logf.FromContext(ctx)
+	log.Info("Starting periodic hostname resolution refresh", "interval", r.ResolveInterval)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := r.refreshResolvedHostCache(ctx); err != nil {
+				log.Error(err, "Could not refresh hostname resolution cache")
+			}
+		}
+	}
+}
+
+func (r *HTTPRouteReconciler) refreshResolvedHostCache(ctx context.Context) error {
+	log := logf.FromContext(ctx)
+
+	routeList := &gatewaynetworkingv1.HTTPRouteList{}
+	if err := r.List(ctx, routeList); err != nil {
+		return err
+	}
+
+	watchers := map[string][]types.NamespacedName{}
+	for i := range routeList.Items {
+		route := &routeList.Items[i]
+		if !routeEnabled(route) || !routeResolveTargets(route, r.ResolveByDefault) {
+			continue
+		}
+
+		serviceNames := backendServiceNames(route)
+		if len(serviceNames) == 0 {
+			continue
+		}
+
+		targets, _, err := r.selectTargetsFromBackendZones(ctx, route.Namespace, serviceNames)
+		if err != nil {
+			log.Error(err, "Could not collect targets for route during periodic resolution", "namespace", route.Namespace, "name", route.Name)
+			continue
+		}
+
+		dnsServer := routeDNSServer(route, r.DNSServer)
+		if dnsServer == "" {
+			dnsServer = defaultDNSServer
+		}
+
+		for _, target := range targets {
+			trimmed := strings.TrimSpace(target)
+			if trimmed == "" || net.ParseIP(trimmed) != nil {
+				continue
+			}
+
+			cacheKey := resolutionCacheKey(dnsServer, trimmed)
+			watchers[cacheKey] = append(watchers[cacheKey], types.NamespacedName{Namespace: route.Namespace, Name: route.Name})
+		}
+	}
+
+	changedRoutes := map[types.NamespacedName]struct{}{}
+	for cacheKey, routeKeys := range watchers {
+		delimiter := strings.Index(cacheKey, "|")
+		if delimiter <= 0 || delimiter >= len(cacheKey)-1 {
+			continue
+		}
+
+		dnsServer := cacheKey[:delimiter]
+		host := cacheKey[delimiter+1:]
+
+		ips, err := resolveHostTarget(ctx, dnsServer, host)
+		if err != nil {
+			if len(r.getCachedResolvedIPs(cacheKey)) > 0 {
+				log.Info("Could not resolve hostname target during periodic refresh, keeping last known good IPs", "host", host, "dnsServer", dnsServer)
+			}
+			continue
+		}
+
+		if !r.compareAndSetCachedResolvedIPs(cacheKey, ips) {
+			continue
+		}
+
+		for _, routeKey := range routeKeys {
+			changedRoutes[routeKey] = struct{}{}
+		}
+	}
+
+	if len(changedRoutes) == 0 {
+		return nil
+	}
+
+	log.Info("Detected changed hostname IPs, reconciling affected routes", "routeCount", len(changedRoutes))
+	for routeKey := range changedRoutes {
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: routeKey})
+		if err != nil {
+			log.Error(err, "Could not reconcile route after hostname IP change", "namespace", routeKey.Namespace, "name", routeKey.Name)
+		}
+	}
+
+	return nil
 }
 
 func (r *HTTPRouteReconciler) mapEndpointSliceToHTTPRoutes(ctx context.Context, obj client.Object) []reconcile.Request {
