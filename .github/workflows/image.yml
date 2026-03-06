@@ -82,6 +82,8 @@ jobs:
         if: github.ref == 'refs/heads/master'
         run: |
           set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           TAG="v0.0.${GITHUB_RUN_NUMBER}"
           if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
             echo "Tag ${TAG} already exists"
