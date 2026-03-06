@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
@@ -52,12 +52,21 @@ jobs:
             type=ref,event=branch
             type=sha,format=short
 
+      - name: Select build platforms
+        id: platforms
+        run: |
+          if [ "${GITHUB_REF}" = "refs/heads/master" ]; then
+            echo "value=linux/amd64,linux/arm64" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=linux/amd64" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push image
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ steps.platforms.outputs.value }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -67,12 +76,14 @@ jobs:
           sbom: false
 
       - name: Update manager image digest
+        if: github.ref == 'refs/heads/master'
         env:
           IMAGE: ${{ steps.prep.outputs.image }}@${{ steps.build.outputs.digest }}
         run: |
           sed -i -E "s|image: .*|        image: ${IMAGE}|" config/manager/manager.yaml
 
       - name: Commit manifest update
+        if: github.ref == 'refs/heads/master'
         env:
           IMAGE: ${{ steps.prep.outputs.image }}@${{ steps.build.outputs.digest }}
         run: |
