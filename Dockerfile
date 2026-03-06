@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-# Build the manager binary
-FROM golang:1.25 AS builder
+# Build the manager binary on the native builder platform to avoid QEMU slowdowns
+FROM --platform=$BUILDPLATFORM golang:1.25 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -19,11 +19,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # Copy the Go source (relies on .dockerignore to filter)
 COPY . .
 
-# Build
-# the GOARCH has no default value to allow the binary to be built according to the host where the command
-# was called. For example, if we call make docker-build in a local env which has the Apple Silicon M1 SO
-# the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
-# by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
+# Build using target platform args provided by BuildKit/Buildx
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
