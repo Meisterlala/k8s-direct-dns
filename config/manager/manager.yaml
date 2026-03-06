@@ -64,7 +64,7 @@ spec:
             - --leader-elect
             - --health-probe-bind-address=:8081
             - --resolve-target-hostnames=true
-          image: ghcr.io/meisterlala/k8s-direct-dns@sha256:40dce1c6200fde858a99af21224e36f9594cdb66d619c93549e0174e5e6e6ebb
+          image: ghcr.io/meisterlala/k8s-direct-dns@sha256:483bca605c46c65905b549eaa2030fc8ddbe9a5ee1a6df4af7b615127badc91f
           name: manager
           ports: []
           securityContext:
