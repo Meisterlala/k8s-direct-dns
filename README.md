@@ -70,7 +70,7 @@ On `HTTPRoute`:
 
 - `directdns.meisterlala.dev/enabled`: `"true"|"false"` (default: true)
 - `directdns.meisterlala.dev/ttl`: integer seconds (default: 1)
-- `directdns.meisterlala.dev/resolve-target-hostnames`: `"true"|"false"` (default: false)
+- `directdns.meisterlala.dev/resolve-target-hostnames`: `"true"|"false"` (defaults to manager flag value)
 - `directdns.meisterlala.dev/dns-server`: DNS resolver override `host[:port]` (default: `1.1.1.1:53`)
 - `external-dns.alpha.kubernetes.io/hostname`: comma-separated additional hostnames
 
@@ -89,7 +89,7 @@ Node target resolution order:
 
 ## Optional Hostname Target Resolution
 
-When `directdns.meisterlala.dev/resolve-target-hostnames: "true"` is set on an `HTTPRoute`,
+When hostname target resolution is enabled globally or by annotation,
 hostname targets (for example from `k3s.io/external-dns`) are resolved to IPs before writing `DNSEndpoint` records.
 
 This is useful when a route would otherwise produce mixed `A` + `CNAME` targets for the same hostname.
@@ -103,6 +103,12 @@ Controller flags:
 
 - `--dns-resolver=host[:port]` (default: `1.1.1.1:53`)
 - `--dns-resolve-interval=1m`
+- `--resolve-target-hostnames=false` (default)
+
+Precedence:
+
+- If `directdns.meisterlala.dev/resolve-target-hostnames` is set on a route, it overrides the manager default for that route
+- Otherwise, the manager `--resolve-target-hostnames` value is used
 
 ## external-dns Configuration
 

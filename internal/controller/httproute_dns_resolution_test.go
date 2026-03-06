@@ -11,18 +11,27 @@ func TestRouteResolveTargets(t *testing.T) {
 	tests := []struct {
 		name  string
 		route gatewaynetworkingv1.HTTPRoute
+		def   bool
 		want  bool
 	}{
 		{
 			name:  "defaults to disabled",
 			route: gatewaynetworkingv1.HTTPRoute{},
+			def:   false,
 			want:  false,
+		},
+		{
+			name:  "uses global default when enabled",
+			route: gatewaynetworkingv1.HTTPRoute{},
+			def:   true,
+			want:  true,
 		},
 		{
 			name: "enabled true",
 			route: gatewaynetworkingv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 				annotationResolve: "true",
 			}}},
+			def:  false,
 			want: true,
 		},
 		{
@@ -30,20 +39,22 @@ func TestRouteResolveTargets(t *testing.T) {
 			route: gatewaynetworkingv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 				annotationResolve: "false",
 			}}},
+			def:  true,
 			want: false,
 		},
 		{
-			name: "invalid value defaults disabled",
+			name: "invalid value falls back to global default",
 			route: gatewaynetworkingv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 				annotationResolve: "not-a-bool",
 			}}},
-			want: false,
+			def:  true,
+			want: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := routeResolveTargets(&tt.route); got != tt.want {
+			if got := routeResolveTargets(&tt.route, tt.def); got != tt.want {
 				t.Fatalf("routeResolveTargets() = %v, want %v", got, tt.want)
 			}
 		})

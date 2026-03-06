@@ -61,9 +61,10 @@ const (
 // HTTPRouteReconciler reconciles a HTTPRoute object
 type HTTPRouteReconciler struct {
 	client.Client
-	Scheme          *runtime.Scheme
-	DNSServer       string
-	ResolveInterval time.Duration
+	Scheme           *runtime.Scheme
+	DNSServer        string
+	ResolveInterval  time.Duration
+	ResolveByDefault bool
 }
 
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch
@@ -132,7 +133,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 }
 
 func (r *HTTPRouteReconciler) resolvedTargetsForRoute(ctx context.Context, route *gatewaynetworkingv1.HTTPRoute, targets []string) ([]string, bool, error) {
-	if !routeResolveTargets(route) {
+	if !routeResolveTargets(route, r.ResolveByDefault) {
 		return targets, false, nil
 	}
 
@@ -231,15 +232,15 @@ func resolveHostTarget(ctx context.Context, dnsServer, host string) ([]string, e
 	return resolved, nil
 }
 
-func routeResolveTargets(route *gatewaynetworkingv1.HTTPRoute) bool {
+func routeResolveTargets(route *gatewaynetworkingv1.HTTPRoute, defaultEnabled bool) bool {
 	raw, ok := route.Annotations[annotationResolve]
 	if !ok || raw == "" {
-		return false
+		return defaultEnabled
 	}
 
 	enabled, err := strconv.ParseBool(raw)
 	if err != nil {
-		return false
+		return defaultEnabled
 	}
 
 	return enabled

@@ -66,6 +66,7 @@ func main() {
 	var enableHTTP2 bool
 	var dnsResolver string
 	var dnsResolveInterval time.Duration
+	var resolveTargetHostnames bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -88,6 +89,8 @@ func main() {
 		"DNS resolver used when resolving hostname targets (host[:port]).")
 	flag.DurationVar(&dnsResolveInterval, "dns-resolve-interval", time.Minute,
 		"Requeue interval used for routes with hostname target resolution enabled.")
+	flag.BoolVar(&resolveTargetHostnames, "resolve-target-hostnames", false,
+		"Enable hostname target resolution for all HTTPRoutes by default.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -188,10 +191,11 @@ func main() {
 	}
 
 	if err := (&controller.HTTPRouteReconciler{
-		Client:          mgr.GetClient(),
-		Scheme:          mgr.GetScheme(),
-		DNSServer:       dnsResolver,
-		ResolveInterval: dnsResolveInterval,
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		DNSServer:        dnsResolver,
+		ResolveInterval:  dnsResolveInterval,
+		ResolveByDefault: resolveTargetHostnames,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "HTTPRoute")
 		os.Exit(1)
