@@ -73,7 +73,7 @@ jobs:
         env:
           IMAGE: ${{ steps.prep.outputs.image }}@${{ steps.build.outputs.digest }}
         run: |
-          sed -i -E "s|image: .*|          image: ${IMAGE}|" config/manager/manager.yaml
+          sed -i -E "s|^[[:space:]]*image:.*$|          image: ${IMAGE}|" config/manager/manager.yaml
 
       - name: Commit manifest update
         if: github.ref == 'refs/heads/master'
