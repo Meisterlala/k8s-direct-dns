@@ -70,6 +70,8 @@ On `HTTPRoute`:
 
 - `directdns.meisterlala.dev/enabled`: `"true"|"false"` (default: true)
 - `directdns.meisterlala.dev/ttl`: integer seconds (default: 1)
+- `directdns.meisterlala.dev/resolve-target-hostnames`: `"true"|"false"` (default: false)
+- `directdns.meisterlala.dev/dns-server`: DNS resolver override `host[:port]` (default: `1.1.1.1:53`)
 - `external-dns.alpha.kubernetes.io/hostname`: comma-separated additional hostnames
 
 On `Node`:
@@ -84,6 +86,23 @@ Node target resolution order:
 4. `k3s.io/external-ip`
 5. `Node.status.addresses[type=ExternalIP]`
 6. `Node.status.addresses[type=InternalIP]`
+
+## Optional Hostname Target Resolution
+
+When `directdns.meisterlala.dev/resolve-target-hostnames: "true"` is set on an `HTTPRoute`,
+hostname targets (for example from `k3s.io/external-dns`) are resolved to IPs before writing `DNSEndpoint` records.
+
+This is useful when a route would otherwise produce mixed `A` + `CNAME` targets for the same hostname.
+
+- Resolved IPs are emitted as `A`/`AAAA` records only
+- Unresolved hostname targets are skipped if at least one target resolves
+- If all hostname targets fail to resolve, the original targets are kept as a safety fallback
+- Routes with hostname resolution enabled are periodically requeued (default: every 1 minute)
+
+Controller flags:
+
+- `--dns-resolver=host[:port]` (default: `1.1.1.1:53`)
+- `--dns-resolve-interval=1m`
 
 ## external-dns Configuration
 

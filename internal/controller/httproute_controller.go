@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -43,21 +44,26 @@ import (
 )
 
 const (
-	annotationEnabled = "directdns.meisterlala.dev/enabled"
-	annotationTTL     = "directdns.meisterlala.dev/ttl"
-	nodeTargetAnn     = "directdns.meisterlala.dev/target"
-	k3sExternalDNSAnn = "k3s.io/external-dns"
-	k3sExternalIPAnn  = "k3s.io/external-ip"
-	zoneLabel         = "topology.kubernetes.io/zone"
-	ingressRoleLabel  = "node-role.kubernetes.io/ingress"
-	legacyRoleLabel   = "kubernetes.io/role"
-	defaultRecordTTL  = int64(1)
+	annotationEnabled   = "directdns.meisterlala.dev/enabled"
+	annotationTTL       = "directdns.meisterlala.dev/ttl"
+	annotationResolve   = "directdns.meisterlala.dev/resolve-target-hostnames"
+	annotationDNSServer = "directdns.meisterlala.dev/dns-server"
+	nodeTargetAnn       = "directdns.meisterlala.dev/target"
+	k3sExternalDNSAnn   = "k3s.io/external-dns"
+	k3sExternalIPAnn    = "k3s.io/external-ip"
+	zoneLabel           = "topology.kubernetes.io/zone"
+	ingressRoleLabel    = "node-role.kubernetes.io/ingress"
+	legacyRoleLabel     = "kubernetes.io/role"
+	defaultRecordTTL    = int64(1)
+	defaultDNSServer    = "1.1.1.1:53"
 )
 
 // HTTPRouteReconciler reconciles a HTTPRoute object
 type HTTPRouteReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme          *runtime.Scheme
+	DNSServer       string
+	ResolveInterval time.Duration
 }
 
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch
@@ -101,6 +107,16 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+
+	result := ctrl.Result{}
+	targets, requeueAfterResolve, err := r.resolvedTargetsForRoute(ctx, route, targets)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if requeueAfterResolve && r.ResolveInterval > 0 {
+		result.RequeueAfter = r.ResolveInterval
+	}
+
 	if len(targets) == 0 {
 		log.Info("Skipping HTTPRoute because no ingress nodes with publishable addresses were found in backend zones", "name", route.Name, "namespace", route.Namespace)
 		return ctrl.Result{}, r.deleteDNSEndpoint(ctx, route.Namespace, dnsEndpointName(req.NamespacedName))
@@ -112,7 +128,145 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	log.Info("Reconciled HTTPRoute DNS targets", "name", route.Name, "namespace", route.Namespace, "nodes", ingressNodeNames, "targets", targets)
 
-	return ctrl.Result{}, nil
+	return result, nil
+}
+
+func (r *HTTPRouteReconciler) resolvedTargetsForRoute(ctx context.Context, route *gatewaynetworkingv1.HTTPRoute, targets []string) ([]string, bool, error) {
+	if !routeResolveTargets(route) {
+		return targets, false, nil
+	}
+
+	dnsServer := routeDNSServer(route, r.DNSServer)
+	if dnsServer == "" {
+		dnsServer = defaultDNSServer
+	}
+
+	resolvedSet := map[string]struct{}{}
+	hadHostTargets := false
+	unresolved := make([]string, 0)
+
+	for _, target := range targets {
+		trimmed := strings.TrimSpace(target)
+		if trimmed == "" {
+			continue
+		}
+
+		if ip := net.ParseIP(trimmed); ip != nil {
+			resolvedSet[trimmed] = struct{}{}
+			continue
+		}
+
+		hadHostTargets = true
+		ips, err := resolveHostTarget(ctx, dnsServer, trimmed)
+		if err != nil {
+			unresolved = append(unresolved, trimmed)
+			continue
+		}
+
+		for _, ip := range ips {
+			resolvedSet[ip] = struct{}{}
+		}
+	}
+
+	if len(resolvedSet) == 0 {
+		fallback := append([]string(nil), targets...)
+		slices.Sort(fallback)
+		return fallback, hadHostTargets, nil
+	}
+
+	resolved := make([]string, 0, len(resolvedSet))
+	for target := range resolvedSet {
+		resolved = append(resolved, target)
+	}
+	slices.Sort(resolved)
+
+	if len(unresolved) > 0 {
+		logf.FromContext(ctx).Info(
+			"Could not resolve some hostname targets and skipped them",
+			"namespace", route.Namespace,
+			"name", route.Name,
+			"dnsServer", dnsServer,
+			"unresolvedTargets", unresolved,
+		)
+	}
+
+	return resolved, hadHostTargets, nil
+}
+
+func resolveHostTarget(ctx context.Context, dnsServer, host string) ([]string, error) {
+	dnsServer = normalizeDNSServer(dnsServer)
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			dialer := &net.Dialer{}
+			return dialer.DialContext(ctx, network, dnsServer)
+		},
+	}
+
+	lookupHost := strings.TrimSuffix(strings.TrimSpace(host), ".")
+	ips, err := resolver.LookupIPAddr(ctx, lookupHost)
+	if err != nil {
+		return nil, err
+	}
+
+	set := map[string]struct{}{}
+	for _, ip := range ips {
+		if ip.IP == nil {
+			continue
+		}
+
+		set[ip.IP.String()] = struct{}{}
+	}
+
+	if len(set) == 0 {
+		return nil, fmt.Errorf("no IP addresses found for hostname %q", host)
+	}
+
+	resolved := make([]string, 0, len(set))
+	for ip := range set {
+		resolved = append(resolved, ip)
+	}
+	slices.Sort(resolved)
+
+	return resolved, nil
+}
+
+func routeResolveTargets(route *gatewaynetworkingv1.HTTPRoute) bool {
+	raw, ok := route.Annotations[annotationResolve]
+	if !ok || raw == "" {
+		return false
+	}
+
+	enabled, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false
+	}
+
+	return enabled
+}
+
+func routeDNSServer(route *gatewaynetworkingv1.HTTPRoute, fallback string) string {
+	if raw, ok := route.Annotations[annotationDNSServer]; ok {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed != "" {
+			return normalizeDNSServer(trimmed)
+		}
+	}
+
+	return normalizeDNSServer(fallback)
+}
+
+func normalizeDNSServer(server string) string {
+	trimmed := strings.TrimSpace(server)
+	if trimmed == "" {
+		return ""
+	}
+
+	if strings.Contains(trimmed, ":") {
+		return trimmed
+	}
+
+	return trimmed + ":53"
 }
 
 // SetupWithManager sets up the controller with the Manager.
