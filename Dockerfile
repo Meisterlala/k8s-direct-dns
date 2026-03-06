@@ -3,6 +3,8 @@ FROM golang:1.25 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
+LABEL org.opencontainers.image.source="https://github.com/Meisterlala/k8s-direct-dns"
+
 WORKDIR /workspace
 # Copy the Go Modules manifests
 COPY go.mod go.mod
