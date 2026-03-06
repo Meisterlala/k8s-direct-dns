@@ -46,8 +46,6 @@ const (
 	annotationEnabled = "directdns.meisterlala.dev/enabled"
 	annotationTTL     = "directdns.meisterlala.dev/ttl"
 	nodeTargetAnn     = "directdns.meisterlala.dev/target"
-
-	defaultRecordTTL = int64(60)
 )
 
 // HTTPRouteReconciler reconciles a HTTPRoute object
@@ -358,20 +356,6 @@ func backendServiceNames(route *gatewaynetworkingv1.HTTPRoute) []string {
 	slices.Sort(serviceNames)
 
 	return serviceNames
-}
-
-func routeTTL(route *gatewaynetworkingv1.HTTPRoute) int64 {
-	raw, ok := route.Annotations[annotationTTL]
-	if !ok || raw == "" {
-		return defaultRecordTTL
-	}
-
-	ttl, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || ttl <= 0 {
-		return defaultRecordTTL
-	}
-
-	return ttl
 }
 
 func recordTypeForTarget(target string) string {
