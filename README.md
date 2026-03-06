@@ -10,10 +10,12 @@ For each `gateway.networking.k8s.io/v1` `HTTPRoute`, the controller:
 
 1. Reads route hostnames (`spec.hostnames` and `external-dns.alpha.kubernetes.io/hostname`)
 2. Resolves backend `Service` references from route rules
-3. Reads matching `EndpointSlice` objects and counts ready endpoints per node
-4. Selects one node deterministically (highest ready endpoint count, then name tie-break)
-5. Resolves a publishable target from that node (`ExternalIP`, fallback `InternalIP`, or explicit node annotation override)
-6. Writes/updates an `externaldns.k8s.io/v1alpha1` `DNSEndpoint`
+3. Reads matching `EndpointSlice` objects and collects ready backend node placement
+4. Resolves backend zones from backend node labels (`topology.kubernetes.io/zone`)
+5. Selects all nodes with role `ingress` in those backend zones
+6. Resolves publishable targets for those ingress nodes (`ExternalIP`, fallback `InternalIP`, or explicit node annotation override)
+7. Writes one or more DNS targets per hostname (multi-value A/AAAA/CNAME records as needed)
+8. Writes/updates an `externaldns.k8s.io/v1alpha1` `DNSEndpoint`
 
 external-dns then reads those `DNSEndpoint` objects and syncs records to your DNS provider.
 
@@ -41,19 +43,21 @@ The controller relies on existing Kubernetes topology and endpoint data:
 
 - `EndpointSlice.endpoints[].nodeName`
 - `EndpointSlice.endpoints[].conditions.ready`
+- `Node.labels[topology.kubernetes.io/zone]`
+- Ingress role labels on nodes (`node-role.kubernetes.io/ingress` or legacy `kubernetes.io/role=ingress`)
 - `Node.status.addresses` (`ExternalIP`, `InternalIP`)
 - Standard topology labels remain available for cluster operations (`topology.kubernetes.io/zone`, `topology.kubernetes.io/region`, `kubernetes.io/hostname`)
 
 No custom topology API is introduced.
 
-## Shared Public IP Limitation (Important)
+## Shared Public IP Behavior (Important)
 
-If two nodes share the same public IP (for example, behind the same NAT), DNS cannot uniquely pin traffic to one of those nodes using A/AAAA records alone.
+If two selected ingress nodes resolve to the same publish IP (for example, behind the same NAT), DNS records will contain that target only once.
 
 Behavior:
 
-- The controller still selects a single node deterministically
-- If selected nodes resolve to the same publish target IP, resulting DNS records are effectively shared
+- The controller selects all ingress nodes in backend zones
+- Duplicate targets are de-duplicated before writing DNS records
 
 Optional mitigation:
 
@@ -65,7 +69,7 @@ Optional mitigation:
 On `HTTPRoute`:
 
 - `directdns.meisterlala.dev/enabled`: `"true"|"false"` (default: true)
-- `directdns.meisterlala.dev/ttl`: integer seconds (default: 60)
+- `directdns.meisterlala.dev/ttl`: integer seconds (default: 1)
 - `external-dns.alpha.kubernetes.io/hostname`: comma-separated additional hostnames
 
 On `Node`:
