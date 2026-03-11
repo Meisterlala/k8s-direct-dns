@@ -17,6 +17,11 @@ For each `gateway.networking.k8s.io/v1` `HTTPRoute`, the controller:
 7. Writes one or more DNS targets per hostname (multi-value A/AAAA/CNAME records as needed)
 8. Writes/updates an `externaldns.k8s.io/v1alpha1` `DNSEndpoint`
 
+Fallback behavior:
+
+- If backend zones are known but no ingress-role nodes with publishable addresses exist in those zones, the controller falls back to using all ingress-role nodes (any zone) so traffic can land on another node.
+- If there are no ready backends with zone labels, or there are no ingress-role nodes with publishable addresses at all, no DNS record is created and any existing `DNSEndpoint` is deleted.
+
 external-dns then reads those `DNSEndpoint` objects and syncs records to your DNS provider.
 
 ## Why DNSEndpoint Instead of HTTPRoute Target Annotation
@@ -49,6 +54,14 @@ The controller relies on existing Kubernetes topology and endpoint data:
 - Standard topology labels remain available for cluster operations (`topology.kubernetes.io/zone`, `topology.kubernetes.io/region`, `kubernetes.io/hostname`)
 
 No custom topology API is introduced.
+
+## Warning Logs
+
+Some situations are logged as warnings (as structured log fields):
+
+- Falling back to all ingress nodes because none were found in backend zones
+- Skipping a route because required inputs are missing (hostnames, backend Service refs, zone labels)
+- Skipping some hostname targets because DNS resolution failed while others succeeded
 
 ## Shared Public IP Behavior (Important)
 

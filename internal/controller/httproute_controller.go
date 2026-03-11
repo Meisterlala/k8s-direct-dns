@@ -100,17 +100,17 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	hostnames := routeHostnames(route)
 	if len(hostnames) == 0 {
-		log.Info("Skipping HTTPRoute because no hostnames were found", "name", route.Name, "namespace", route.Namespace)
+		log.Info("Skipping HTTPRoute because no hostnames were found", "name", route.Name, "namespace", route.Namespace, "warning", true)
 		return ctrl.Result{}, r.deleteDNSEndpoint(ctx, route.Namespace, dnsEndpointName(req.NamespacedName))
 	}
 
 	serviceNames := backendServiceNames(route)
 	if len(serviceNames) == 0 {
-		log.Info("Skipping HTTPRoute because no in-namespace Service backends were found", "name", route.Name, "namespace", route.Namespace)
+		log.Info("Skipping HTTPRoute because no in-namespace Service backends were found", "name", route.Name, "namespace", route.Namespace, "warning", true)
 		return ctrl.Result{}, r.deleteDNSEndpoint(ctx, route.Namespace, dnsEndpointName(req.NamespacedName))
 	}
 
-	targets, ingressNodeNames, err := r.selectTargetsFromBackendZones(ctx, route.Namespace, serviceNames)
+	targets, ingressNodeNames, backendZonesKnown, err := r.selectTargetsFromBackendZones(ctx, route.Namespace, serviceNames)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -120,8 +120,35 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	targets = filterTargetsByIPFamily(targets, r.EnableIPv4, r.EnableIPv6)
 
 	if len(targets) == 0 {
-		log.Info("Skipping HTTPRoute because no ingress nodes with publishable addresses were found in backend zones", "name", route.Name, "namespace", route.Namespace)
-		return ctrl.Result{}, r.deleteDNSEndpoint(ctx, route.Namespace, dnsEndpointName(req.NamespacedName))
+		if !backendZonesKnown {
+			log.Info("Skipping HTTPRoute because no ready backends with zone labels were found", "name", route.Name, "namespace", route.Namespace, "warning", true)
+			return ctrl.Result{}, r.deleteDNSEndpoint(ctx, route.Namespace, dnsEndpointName(req.NamespacedName))
+		}
+
+		fallbackTargets, fallbackIngressNodes, err := r.allIngressTargets(ctx)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		fallbackTargets = r.resolvedTargetsForRoute(ctx, route, fallbackTargets)
+		fallbackTargets = filterTargetsByIPFamily(fallbackTargets, r.EnableIPv4, r.EnableIPv6)
+		if len(fallbackTargets) == 0 {
+			log.Info("Skipping HTTPRoute because no ingress nodes with publishable addresses were found", "name", route.Name, "namespace", route.Namespace, "warning", true)
+			return ctrl.Result{}, r.deleteDNSEndpoint(ctx, route.Namespace, dnsEndpointName(req.NamespacedName))
+		}
+
+		log.Info(
+			"Falling back to all ingress nodes because no publishable ingress nodes were found in backend zones",
+			"name", route.Name,
+			"namespace", route.Namespace,
+			"services", serviceNames,
+			"fallbackNodes", fallbackIngressNodes,
+			"fallbackTargets", fallbackTargets,
+			"warning", true,
+		)
+
+		targets = fallbackTargets
+		ingressNodeNames = fallbackIngressNodes
 	}
 
 	if err := r.upsertDNSEndpoint(ctx, route, hostnames, targets, routeTTL(route)); err != nil {
@@ -197,6 +224,7 @@ func (r *HTTPRouteReconciler) resolvedTargetsForRoute(ctx context.Context, route
 			"name", route.Name,
 			"dnsServer", dnsServer,
 			"unresolvedTargets", unresolved,
+			"warning", true,
 		)
 	}
 
@@ -430,10 +458,18 @@ func (r *HTTPRouteReconciler) refreshResolvedHostCache(ctx context.Context) erro
 			continue
 		}
 
-		targets, _, err := r.selectTargetsFromBackendZones(ctx, route.Namespace, serviceNames)
+		targets, _, _, err := r.selectTargetsFromBackendZones(ctx, route.Namespace, serviceNames)
 		if err != nil {
 			log.Error(err, "Could not collect targets for route during periodic resolution", "namespace", route.Namespace, "name", route.Name)
 			continue
+		}
+		if len(targets) == 0 {
+			fallbackTargets, _, fallbackErr := r.allIngressTargets(ctx)
+			if fallbackErr != nil {
+				log.Error(fallbackErr, "Could not collect fallback ingress targets for route during periodic resolution", "namespace", route.Namespace, "name", route.Name)
+				continue
+			}
+			targets = fallbackTargets
 		}
 
 		dnsServer := routeDNSServer(route, r.DNSServer)
@@ -465,7 +501,7 @@ func (r *HTTPRouteReconciler) refreshResolvedHostCache(ctx context.Context) erro
 		ips, err := resolveHostTarget(ctx, dnsServer, host)
 		if err != nil {
 			if len(r.getCachedResolvedIPs(cacheKey)) > 0 {
-				log.Info("Could not resolve hostname target during periodic refresh, keeping last known good IPs", "host", host, "dnsServer", dnsServer)
+				log.Info("Could not resolve hostname target during periodic refresh, keeping last known good IPs", "host", host, "dnsServer", dnsServer, "warning", true)
 			}
 			continue
 		}
@@ -543,24 +579,29 @@ func (r *HTTPRouteReconciler) mapNodeToHTTPRoutes(ctx context.Context, _ client.
 // selectTargetsFromBackendZones maps backend placement to publishable ingress targets.
 // It collects ready backend nodes, derives their zones, then includes ingress nodes
 // from those zones and resolves their publish targets.
-func (r *HTTPRouteReconciler) selectTargetsFromBackendZones(ctx context.Context, namespace string, services []string) ([]string, []string, error) {
+func (r *HTTPRouteReconciler) selectTargetsFromBackendZones(ctx context.Context, namespace string, services []string) ([]string, []string, bool, error) {
 	backendNodeNames, err := r.readyBackendNodeNames(ctx, namespace, services)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	if len(backendNodeNames) == 0 {
-		return nil, nil, nil
+		return nil, nil, false, nil
 	}
 
 	backendZones, err := r.backendZones(ctx, backendNodeNames)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	if len(backendZones) == 0 {
-		return nil, nil, nil
+		return nil, nil, false, nil
 	}
 
-	return r.ingressTargetsForZones(ctx, backendZones)
+	targets, nodes, err := r.ingressTargetsForZones(ctx, backendZones)
+	if err != nil {
+		return nil, nil, true, err
+	}
+
+	return targets, nodes, true, nil
 }
 
 // readyBackendNodeNames returns unique node names that host ready backend endpoints.
@@ -645,6 +686,46 @@ func (r *HTTPRouteReconciler) ingressTargetsForZones(ctx context.Context, zones 
 			continue
 		}
 		if _, ok := zones[zone]; !ok {
+			continue
+		}
+
+		target := resolveNodeTargetFromNode(node)
+		if target == "" {
+			continue
+		}
+
+		targetSet[target] = struct{}{}
+		nodeSet[node.Name] = struct{}{}
+	}
+
+	targets := make([]string, 0, len(targetSet))
+	for target := range targetSet {
+		targets = append(targets, target)
+	}
+	slices.Sort(targets)
+
+	nodes := make([]string, 0, len(nodeSet))
+	for nodeName := range nodeSet {
+		nodes = append(nodes, nodeName)
+	}
+	slices.Sort(nodes)
+
+	return targets, nodes, nil
+}
+
+// allIngressTargets returns all unique publish targets and node names for ingress-role nodes.
+func (r *HTTPRouteReconciler) allIngressTargets(ctx context.Context) ([]string, []string, error) {
+	nodeList := &corev1.NodeList{}
+	if err := r.List(ctx, nodeList); err != nil {
+		return nil, nil, err
+	}
+
+	targetSet := map[string]struct{}{}
+	nodeSet := map[string]struct{}{}
+
+	for i := range nodeList.Items {
+		node := &nodeList.Items[i]
+		if !isIngressNode(node) {
 			continue
 		}
 
