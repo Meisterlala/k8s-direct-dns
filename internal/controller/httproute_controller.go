@@ -958,10 +958,12 @@ func (r *HTTPRouteReconciler) upsertDNSEndpoint(
 		}
 
 		dnsEndpoint.Spec.Endpoints = records
-		if dnsEndpoint.Annotations == nil {
-			dnsEndpoint.Annotations = map[string]string{}
+		if dnsEndpoint.Annotations != nil {
+			delete(dnsEndpoint.Annotations, annotationStaleSince)
+			if len(dnsEndpoint.Annotations) == 0 {
+				dnsEndpoint.Annotations = nil
+			}
 		}
-		delete(dnsEndpoint.Annotations, annotationStaleSince)
 		dnsEndpoint.Labels = map[string]string{
 			"app.kubernetes.io/managed-by": "k8s-direct-dns",
 		}

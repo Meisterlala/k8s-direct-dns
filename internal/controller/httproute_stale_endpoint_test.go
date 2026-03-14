@@ -133,11 +133,44 @@ func TestReconcileNoValidTargetsDeletesImmediatelyWhenGraceDisabled(t *testing.T
 	}
 }
 
+func TestUpsertDNSEndpointRemovesStaleAnnotationWithoutEmptyAnnotationsMap(t *testing.T) {
+	route := &gatewaynetworkingv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "default", UID: types.UID("route-uid")}}
+	dnsEndpoint := &externaldnsv1alpha1.DNSEndpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dnsEndpointName(types.NamespacedName{Namespace: route.Namespace, Name: route.Name}),
+			Namespace: route.Namespace,
+			Annotations: map[string]string{
+				annotationStaleSince: time.Now().UTC().Format(time.RFC3339Nano),
+			},
+		},
+	}
+
+	reconciler := newStaleEndpointTestReconciler(t, time.Now().UTC(), 5*time.Minute, dnsEndpoint)
+
+	err := reconciler.upsertDNSEndpoint(context.Background(), route, []string{"app.example.com"}, []string{"203.0.113.10"}, 300)
+	if err != nil {
+		t.Fatalf("upsertDNSEndpoint() error = %v", err)
+	}
+
+	updated := &externaldnsv1alpha1.DNSEndpoint{}
+	err = reconciler.Get(context.Background(), types.NamespacedName{Namespace: route.Namespace, Name: dnsEndpoint.Name}, updated)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	if updated.Annotations != nil {
+		t.Fatalf("annotations = %#v, want nil", updated.Annotations)
+	}
+}
+
 func newStaleEndpointTestReconciler(t *testing.T, now time.Time, grace time.Duration, objects ...client.Object) *HTTPRouteReconciler {
 	t.Helper()
 
 	scheme := runtime.NewScheme()
 	if err := externaldnsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := gatewaynetworkingv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
 
