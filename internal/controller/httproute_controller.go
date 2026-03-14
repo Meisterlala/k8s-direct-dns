@@ -45,32 +45,35 @@ import (
 )
 
 const (
-	annotationEnabled   = "directdns.meisterlala.dev/enabled"
-	annotationTTL       = "directdns.meisterlala.dev/ttl"
-	annotationResolve   = "directdns.meisterlala.dev/resolve-target-hostnames"
-	annotationDNSServer = "directdns.meisterlala.dev/dns-server"
-	nodeTargetAnn       = "directdns.meisterlala.dev/target"
-	k3sExternalDNSAnn   = "k3s.io/external-dns"
-	k3sExternalIPAnn    = "k3s.io/external-ip"
-	zoneLabel           = "topology.kubernetes.io/zone"
-	ingressRoleLabel    = "node-role.kubernetes.io/ingress"
-	legacyRoleLabel     = "kubernetes.io/role"
-	defaultRecordTTL    = int64(1)
-	defaultDNSServer    = "1.1.1.1:53"
+	annotationEnabled    = "directdns.meisterlala.dev/enabled"
+	annotationTTL        = "directdns.meisterlala.dev/ttl"
+	annotationResolve    = "directdns.meisterlala.dev/resolve-target-hostnames"
+	annotationDNSServer  = "directdns.meisterlala.dev/dns-server"
+	annotationStaleSince = "directdns.meisterlala.dev/stale-since"
+	nodeTargetAnn        = "directdns.meisterlala.dev/target"
+	k3sExternalDNSAnn    = "k3s.io/external-dns"
+	k3sExternalIPAnn     = "k3s.io/external-ip"
+	zoneLabel            = "topology.kubernetes.io/zone"
+	ingressRoleLabel     = "node-role.kubernetes.io/ingress"
+	legacyRoleLabel      = "kubernetes.io/role"
+	defaultRecordTTL     = int64(1)
+	defaultDNSServer     = "1.1.1.1:53"
 )
 
 // HTTPRouteReconciler reconciles a HTTPRoute object
 type HTTPRouteReconciler struct {
 	client.Client
-	Scheme           *runtime.Scheme
-	DNSServer        string
-	ResolveInterval  time.Duration
-	ResolveByDefault bool
-	EnableIPv4       bool
-	EnableIPv6       bool
+	Scheme                   *runtime.Scheme
+	DNSServer                string
+	ResolveInterval          time.Duration
+	ResolveByDefault         bool
+	EnableIPv4               bool
+	EnableIPv6               bool
+	StaleEndpointGracePeriod time.Duration
 
 	resolutionMu    sync.RWMutex
 	resolvedHostIPs map[string][]string
+	now             func() time.Time
 }
 
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch
@@ -122,7 +125,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if len(targets) == 0 {
 		if !backendZonesKnown {
 			log.Info("Skipping HTTPRoute because no ready backends with zone labels were found", "name", route.Name, "namespace", route.Namespace, "warning", true)
-			return ctrl.Result{}, r.deleteDNSEndpoint(ctx, route.Namespace, dnsEndpointName(req.NamespacedName))
+			return r.reconcileNoValidTargets(ctx, route)
 		}
 
 		fallbackTargets, fallbackIngressNodes, err := r.allIngressTargets(ctx)
@@ -134,7 +137,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		fallbackTargets = filterTargetsByIPFamily(fallbackTargets, r.EnableIPv4, r.EnableIPv6)
 		if len(fallbackTargets) == 0 {
 			log.Info("Skipping HTTPRoute because no ingress nodes with publishable addresses were found", "name", route.Name, "namespace", route.Namespace, "warning", true)
-			return ctrl.Result{}, r.deleteDNSEndpoint(ctx, route.Namespace, dnsEndpointName(req.NamespacedName))
+			return r.reconcileNoValidTargets(ctx, route)
 		}
 
 		log.Info(
@@ -158,6 +161,104 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	log.Info("Reconciled HTTPRoute DNS targets", "name", route.Name, "namespace", route.Namespace, "nodes", ingressNodeNames, "targets", targets)
 
 	return ctrl.Result{}, nil
+}
+
+func (r *HTTPRouteReconciler) reconcileNoValidTargets(ctx context.Context, route *gatewaynetworkingv1.HTTPRoute) (ctrl.Result, error) {
+	if r.StaleEndpointGracePeriod <= 0 {
+		return ctrl.Result{}, r.deleteDNSEndpoint(ctx, route.Namespace, dnsEndpointName(types.NamespacedName{Namespace: route.Namespace, Name: route.Name}))
+	}
+
+	now := r.currentTime()
+	log := logf.FromContext(ctx)
+	dnsEndpoint := &externaldnsv1alpha1.DNSEndpoint{}
+	key := types.NamespacedName{Namespace: route.Namespace, Name: dnsEndpointName(types.NamespacedName{Namespace: route.Namespace, Name: route.Name})}
+	if err := r.Get(ctx, key, dnsEndpoint); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+
+		return ctrl.Result{}, err
+	}
+
+	if len(dnsEndpoint.Spec.Endpoints) == 0 {
+		return ctrl.Result{}, r.deleteDNSEndpoint(ctx, route.Namespace, dnsEndpointName(types.NamespacedName{Namespace: route.Namespace, Name: route.Name}))
+	}
+
+	staleSince := now
+	staleSinceRaw := ""
+	shouldPersistStaleSince := false
+	if dnsEndpoint.Annotations != nil {
+		staleSinceRaw = strings.TrimSpace(dnsEndpoint.Annotations[annotationStaleSince])
+	}
+
+	if staleSinceRaw == "" {
+		shouldPersistStaleSince = true
+	} else {
+		parsed, err := time.Parse(time.RFC3339Nano, staleSinceRaw)
+		if err == nil {
+			staleSince = parsed
+		} else {
+			shouldPersistStaleSince = true
+			log.Info(
+				"Could not parse stale-since annotation on DNSEndpoint, resetting grace timer",
+				"namespace", route.Namespace,
+				"name", route.Name,
+				"dnsEndpoint", dnsEndpoint.Name,
+				"staleSince", staleSinceRaw,
+				"warning", true,
+			)
+		}
+	}
+
+	expiresAt := staleSince.Add(r.StaleEndpointGracePeriod)
+	if now.Before(expiresAt) {
+		if shouldPersistStaleSince {
+			if dnsEndpoint.Annotations == nil {
+				dnsEndpoint.Annotations = map[string]string{}
+			}
+			dnsEndpoint.Annotations[annotationStaleSince] = staleSince.Format(time.RFC3339Nano)
+			if err := r.Update(ctx, dnsEndpoint); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+
+		remaining := expiresAt.Sub(now)
+		if remaining <= 0 {
+			remaining = time.Second
+		}
+
+		log.Info(
+			"Keeping previous DNS targets because no valid targets were found",
+			"namespace", route.Namespace,
+			"name", route.Name,
+			"dnsEndpoint", dnsEndpoint.Name,
+			"gracePeriod", r.StaleEndpointGracePeriod,
+			"expiresAt", expiresAt.Format(time.RFC3339),
+			"warning", true,
+		)
+
+		return ctrl.Result{RequeueAfter: remaining}, nil
+	}
+
+	log.Info(
+		"Removed DNSEndpoint after stale grace period elapsed",
+		"namespace", route.Namespace,
+		"name", route.Name,
+		"dnsEndpoint", dnsEndpoint.Name,
+		"staleSince", staleSince.Format(time.RFC3339),
+		"gracePeriod", r.StaleEndpointGracePeriod,
+		"warning", true,
+	)
+
+	return ctrl.Result{}, r.deleteDNSEndpoint(ctx, route.Namespace, dnsEndpointName(types.NamespacedName{Namespace: route.Namespace, Name: route.Name}))
+}
+
+func (r *HTTPRouteReconciler) currentTime() time.Time {
+	if r.now != nil {
+		return r.now().UTC()
+	}
+
+	return time.Now().UTC()
 }
 
 func (r *HTTPRouteReconciler) resolvedTargetsForRoute(ctx context.Context, route *gatewaynetworkingv1.HTTPRoute, targets []string) []string {
@@ -394,6 +495,10 @@ func (r *HTTPRouteReconciler) compareAndSetCachedResolvedIPs(key string, ips []s
 func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.resolvedHostIPs == nil {
 		r.resolvedHostIPs = map[string][]string{}
+	}
+
+	if r.now == nil {
+		r.now = time.Now
 	}
 
 	if err := ctrl.NewControllerManagedBy(mgr).
@@ -853,6 +958,10 @@ func (r *HTTPRouteReconciler) upsertDNSEndpoint(
 		}
 
 		dnsEndpoint.Spec.Endpoints = records
+		if dnsEndpoint.Annotations == nil {
+			dnsEndpoint.Annotations = map[string]string{}
+		}
+		delete(dnsEndpoint.Annotations, annotationStaleSince)
 		dnsEndpoint.Labels = map[string]string{
 			"app.kubernetes.io/managed-by": "k8s-direct-dns",
 		}

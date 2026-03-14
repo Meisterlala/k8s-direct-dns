@@ -119,6 +119,13 @@ Controller flags:
 - `--resolve-target-hostnames=false` (default)
 - `--enable-ipv4=true` (default)
 - `--enable-ipv6=false` (default)
+- `--stale-endpoint-grace-period=5m` (default)
+
+Stale endpoint behavior:
+
+- When a route temporarily has no valid targets (for example during pod restarts), the last published `DNSEndpoint` is kept for the grace period
+- If valid targets return before the grace period expires, normal updates resume and stale tracking is cleared
+- If no valid targets return before the grace period expires, the `DNSEndpoint` is deleted
 
 IP family behavior:
 

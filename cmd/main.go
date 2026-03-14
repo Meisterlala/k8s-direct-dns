@@ -69,6 +69,7 @@ func main() {
 	var resolveTargetHostnames bool
 	var enableIPv4 bool
 	var enableIPv6 bool
+	var staleEndpointGracePeriod time.Duration
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -97,6 +98,8 @@ func main() {
 		"Enable publishing IPv4 (A) targets.")
 	flag.BoolVar(&enableIPv6, "enable-ipv6", false,
 		"Enable publishing IPv6 (AAAA) targets.")
+	flag.DurationVar(&staleEndpointGracePeriod, "stale-endpoint-grace-period", 5*time.Minute,
+		"Keep the last published DNSEndpoint for this duration when no valid targets are temporarily available.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -197,13 +200,14 @@ func main() {
 	}
 
 	if err := (&controller.HTTPRouteReconciler{
-		Client:           mgr.GetClient(),
-		Scheme:           mgr.GetScheme(),
-		DNSServer:        dnsResolver,
-		ResolveInterval:  dnsResolveInterval,
-		ResolveByDefault: resolveTargetHostnames,
-		EnableIPv4:       enableIPv4,
-		EnableIPv6:       enableIPv6,
+		Client:                   mgr.GetClient(),
+		Scheme:                   mgr.GetScheme(),
+		DNSServer:                dnsResolver,
+		ResolveInterval:          dnsResolveInterval,
+		ResolveByDefault:         resolveTargetHostnames,
+		EnableIPv4:               enableIPv4,
+		EnableIPv6:               enableIPv6,
+		StaleEndpointGracePeriod: staleEndpointGracePeriod,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "HTTPRoute")
 		os.Exit(1)
