@@ -131,12 +131,12 @@ docker-push: ## Push docker image with the manager.
 # To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
 #PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
 PLATFORMS ?= linux/arm64,linux/amd64
+BUILDER_NAME ?= k8s-direct-dns-builder
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
-	- $(CONTAINER_TOOL) buildx create --name k8s-direct-dns-builder
-	$(CONTAINER_TOOL) buildx use k8s-direct-dns-builder
+	- $(CONTAINER_TOOL) buildx create --name $(BUILDER_NAME) --use
+	$(CONTAINER_TOOL) buildx use $(BUILDER_NAME)
 	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile .
-	- $(CONTAINER_TOOL) buildx rm k8s-direct-dns-builder
 
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
