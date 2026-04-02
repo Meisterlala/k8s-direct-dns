@@ -5,6 +5,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	gatewaynetworkingv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 func TestResolveNodeTargetFromNode(t *testing.T) {
@@ -100,5 +101,63 @@ func TestResolveNodeTargetFromNode(t *testing.T) {
 				t.Fatalf("resolveNodeTargetFromNode() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRouteTargetNodeNames(t *testing.T) {
+	tests := []struct {
+		name  string
+		route *gatewaynetworkingv1.HTTPRoute
+		want  []string
+	}{
+		{
+			name:  "missing annotation",
+			route: &gatewaynetworkingv1.HTTPRoute{},
+			want:  nil,
+		},
+		{
+			name: "empty annotation",
+			route: &gatewaynetworkingv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{annotationTargetNodes: "  "}},
+			},
+			want: nil,
+		},
+		{
+			name: "trims deduplicates and sorts",
+			route: &gatewaynetworkingv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{annotationTargetNodes: " odin,baldr ,odin,, ran  "}},
+			},
+			want: []string{"baldr", "odin", "ran"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := routeTargetNodeNames(tt.route)
+			if len(got) != len(tt.want) {
+				t.Fatalf("routeTargetNodeNames() len = %d, want %d (got=%v want=%v)", len(got), len(tt.want), got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("routeTargetNodeNames()[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestRouteHasTargetNodeOverride(t *testing.T) {
+	if routeHasTargetNodeOverride(&gatewaynetworkingv1.HTTPRoute{}) {
+		t.Fatal("routeHasTargetNodeOverride() = true, want false")
+	}
+
+	route := &gatewaynetworkingv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{annotationTargetNodes: "baldr"},
+		},
+	}
+
+	if !routeHasTargetNodeOverride(route) {
+		t.Fatal("routeHasTargetNodeOverride() = false, want true")
 	}
 }

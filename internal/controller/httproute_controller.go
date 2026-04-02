@@ -45,19 +45,21 @@ import (
 )
 
 const (
-	annotationEnabled    = "directdns.meisterlala.dev/enabled"
-	annotationTTL        = "directdns.meisterlala.dev/ttl"
-	annotationResolve    = "directdns.meisterlala.dev/resolve-target-hostnames"
-	annotationDNSServer  = "directdns.meisterlala.dev/dns-server"
-	annotationStaleSince = "directdns.meisterlala.dev/stale-since"
-	nodeTargetAnn        = "directdns.meisterlala.dev/target"
-	k3sExternalDNSAnn    = "k3s.io/external-dns"
-	k3sExternalIPAnn     = "k3s.io/external-ip"
-	zoneLabel            = "topology.kubernetes.io/zone"
-	ingressRoleLabel     = "node-role.kubernetes.io/ingress"
-	legacyRoleLabel      = "kubernetes.io/role"
-	defaultRecordTTL     = int64(1)
-	defaultDNSServer     = "1.1.1.1:53"
+	annotationEnabled     = "directdns.meisterlala.dev/enabled"
+	annotationTTL         = "directdns.meisterlala.dev/ttl"
+	annotationResolve     = "directdns.meisterlala.dev/resolve-target-hostnames"
+	annotationDNSServer   = "directdns.meisterlala.dev/dns-server"
+	annotationStaleSince  = "directdns.meisterlala.dev/stale-since"
+	annotationHostname    = "directdns.meisterlala.dev/hostname"
+	annotationTargetNodes = "directdns.meisterlala.dev/target-nodes"
+	nodeTargetAnn         = "directdns.meisterlala.dev/target"
+	k3sExternalDNSAnn     = "k3s.io/external-dns"
+	k3sExternalIPAnn      = "k3s.io/external-ip"
+	zoneLabel             = "topology.kubernetes.io/zone"
+	ingressRoleLabel      = "node-role.kubernetes.io/ingress"
+	legacyRoleLabel       = "kubernetes.io/role"
+	defaultRecordTTL      = int64(1)
+	defaultDNSServer      = "1.1.1.1:53"
 )
 
 // HTTPRouteReconciler reconciles a HTTPRoute object
@@ -113,7 +115,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, r.deleteDNSEndpoint(ctx, route.Namespace, dnsEndpointName(req.NamespacedName))
 	}
 
-	targets, ingressNodeNames, backendZonesKnown, err := r.selectTargetsFromBackendZones(ctx, route.Namespace, serviceNames)
+	targets, ingressNodeNames, backendZonesKnown, err := r.routeTargets(ctx, route, serviceNames)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -563,12 +565,12 @@ func (r *HTTPRouteReconciler) refreshResolvedHostCache(ctx context.Context) erro
 			continue
 		}
 
-		targets, _, _, err := r.selectTargetsFromBackendZones(ctx, route.Namespace, serviceNames)
+		targets, _, _, err := r.routeTargets(ctx, route, serviceNames)
 		if err != nil {
 			log.Error(err, "Could not collect targets for route during periodic resolution", "namespace", route.Namespace, "name", route.Name)
 			continue
 		}
-		if len(targets) == 0 {
+		if len(targets) == 0 && !routeHasTargetNodeOverride(route) {
 			fallbackTargets, _, fallbackErr := r.allIngressTargets(ctx)
 			if fallbackErr != nil {
 				log.Error(fallbackErr, "Could not collect fallback ingress targets for route during periodic resolution", "namespace", route.Namespace, "name", route.Name)
@@ -633,6 +635,95 @@ func (r *HTTPRouteReconciler) refreshResolvedHostCache(ctx context.Context) erro
 	}
 
 	return nil
+}
+
+func (r *HTTPRouteReconciler) routeTargets(
+	ctx context.Context,
+	route *gatewaynetworkingv1.HTTPRoute,
+	services []string,
+) ([]string, []string, bool, error) {
+	if targets, nodes, ok, err := r.routeTargetsFromNodeOverride(ctx, route); ok || err != nil {
+		return targets, nodes, true, err
+	}
+
+	return r.selectTargetsFromBackendZones(ctx, route.Namespace, services)
+}
+
+func routeHasTargetNodeOverride(route *gatewaynetworkingv1.HTTPRoute) bool {
+	for _, nodeName := range routeTargetNodeNames(route) {
+		if nodeName != "" {
+			return true
+		}
+	}
+
+	return false
+}
+
+func routeTargetNodeNames(route *gatewaynetworkingv1.HTTPRoute) []string {
+	raw := strings.TrimSpace(route.Annotations[annotationTargetNodes])
+	if raw == "" {
+		return nil
+	}
+
+	nodeSet := map[string]struct{}{}
+	for nodeName := range strings.SplitSeq(raw, ",") {
+		trimmed := strings.TrimSpace(nodeName)
+		if trimmed == "" {
+			continue
+		}
+
+		nodeSet[trimmed] = struct{}{}
+	}
+
+	nodes := make([]string, 0, len(nodeSet))
+	for nodeName := range nodeSet {
+		nodes = append(nodes, nodeName)
+	}
+	slices.Sort(nodes)
+
+	return nodes
+}
+
+func (r *HTTPRouteReconciler) routeTargetsFromNodeOverride(
+	ctx context.Context,
+	route *gatewaynetworkingv1.HTTPRoute,
+) ([]string, []string, bool, error) {
+	nodeNames := routeTargetNodeNames(route)
+	if len(nodeNames) == 0 {
+		return nil, nil, false, nil
+	}
+
+	targetSet := map[string]struct{}{}
+	resolvedNodes := make([]string, 0, len(nodeNames))
+
+	for _, nodeName := range nodeNames {
+		node := &corev1.Node{}
+		if err := r.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+
+			return nil, nil, true, err
+		}
+
+		target := resolveNodeTargetFromNode(node)
+		if target == "" {
+			continue
+		}
+
+		targetSet[target] = struct{}{}
+		resolvedNodes = append(resolvedNodes, nodeName)
+	}
+
+	targets := make([]string, 0, len(targetSet))
+	for target := range targetSet {
+		targets = append(targets, target)
+	}
+	slices.Sort(targets)
+
+	slices.Sort(resolvedNodes)
+
+	return targets, resolvedNodes, true, nil
 }
 
 func (r *HTTPRouteReconciler) mapEndpointSliceToHTTPRoutes(ctx context.Context, obj client.Object) []reconcile.Request {

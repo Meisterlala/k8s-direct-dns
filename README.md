@@ -17,6 +17,11 @@ For each `gateway.networking.k8s.io/v1` `HTTPRoute`, the controller:
 7. Writes one or more DNS targets per hostname (multi-value A/AAAA/CNAME records as needed)
 8. Writes/updates an `externaldns.k8s.io/v1alpha1` `DNSEndpoint`
 
+Optional route pinning behavior:
+
+- If `directdns.meisterlala.dev/target-nodes` is set on the route, the controller skips backend zone selection and resolves targets only from the listed node names.
+- This lets workloads run on any node while DNS stays pinned to specific ingress node targets.
+
 Fallback behavior:
 
 - If backend zones are known but no ingress-role nodes with publishable addresses exist in those zones, the controller falls back to using all ingress-role nodes (any zone) so traffic can land on another node.
@@ -85,6 +90,7 @@ On `HTTPRoute`:
 - `directdns.meisterlala.dev/ttl`: integer seconds (default: 1)
 - `directdns.meisterlala.dev/resolve-target-hostnames`: `"true"|"false"` (defaults to manager flag value)
 - `directdns.meisterlala.dev/dns-server`: DNS resolver override `host[:port]` (default: `1.1.1.1:53`)
+- `directdns.meisterlala.dev/target-nodes`: comma-separated node names to use as DNS target sources for this route (for example: `baldr` or `baldr,ran`)
 - `external-dns.alpha.kubernetes.io/hostname`: comma-separated additional hostnames
 
 On `Node`:
@@ -99,6 +105,13 @@ Node target resolution order:
 4. `k3s.io/external-ip`
 5. `Node.status.addresses[type=ExternalIP]`
 6. `Node.status.addresses[type=InternalIP]`
+
+`target-nodes` behavior details:
+
+- Node names are trimmed, de-duplicated, and sorted
+- Missing nodes or nodes without a publishable target are ignored
+- If no listed node resolves to a target, no targets are produced for that route
+- Standard fallback to all ingress nodes is not used for routes that set `target-nodes`
 
 ## Optional Hostname Target Resolution
 
